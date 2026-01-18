@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.config.settings import settings
 from src.cli import create_parser, print_banner, print_verbose_header, print_collaboration_summary, CLIModes
 from src.agents.feature_extraction.agent import FeatureExtractionAgent
+from src.agents.circuits_analysis.agent import CircuitsAnalysisAgent
 
 
 class ResearchAssistant:
@@ -29,15 +30,55 @@ class ResearchAssistant:
         self.verbose = verbose and not quiet
         self.quiet = quiet
 
-        # Initialize agents (starting with Agent 1 only)
+        # Initialize agents
         self.feature_agent = FeatureExtractionAgent(verbose=self.verbose)
+        self.circuits_agent = CircuitsAnalysisAgent(verbose=self.verbose)
 
         # Track active agents
         self.active_agents = {
             "feature_extraction": self.feature_agent,
-            # "circuits_analysis": None,  # TODO: Implement
+            "circuits_analysis": self.circuits_agent,
             # "research_synthesizer": None,  # TODO: Implement
         }
+
+    def _route_query(self, query: str) -> tuple[str, any]:
+        """
+        Route query to the most appropriate agent
+
+        Args:
+            query: User's question
+
+        Returns:
+            Tuple of (agent_name, agent_instance)
+        """
+        query_lower = query.lower()
+
+        # Keywords for Circuits Analysis Agent
+        circuits_keywords = [
+            "circuit", "attention head", "induction head", "mechanism",
+            "activation patching", "causal tracing", "ablation",
+            "information flow", "path patching", "logit attribution",
+            "attention pattern", "qk circuit", "ov circuit",
+            "indirect object identification", "ioi"
+        ]
+
+        # Keywords for Feature Extraction Agent
+        features_keywords = [
+            "monosemanticity", "polysemanticity", "sparse autoencoder", "sae",
+            "dictionary learning", "feature visualization", "superposition",
+            "transformerlens", "saelens", "feature extraction"
+        ]
+
+        # Check for circuits-related queries
+        circuits_score = sum(1 for keyword in circuits_keywords if keyword in query_lower)
+        features_score = sum(1 for keyword in features_keywords if keyword in query_lower)
+
+        # Route based on keyword matching
+        if circuits_score > features_score:
+            return "Circuits & Mechanistic Analysis Specialist", self.circuits_agent
+        else:
+            # Default to Feature Extraction agent
+            return "Feature Extraction & Interpretability Specialist", self.feature_agent
 
     def process_query(self, query: str) -> dict:
         """
@@ -54,12 +95,13 @@ class ResearchAssistant:
         if self.verbose:
             print_verbose_header(query)
 
-        # For now, route everything to Feature Extraction agent
-        # TODO: Implement intelligent routing when we have multiple agents
-        if self.verbose:
-            print(f"\n[Routing] Forwarding to Feature Extraction Specialist")
+        # Route query to appropriate agent
+        agent_name, agent = self._route_query(query)
 
-        response = self.feature_agent.answer_question(
+        if self.verbose:
+            print(f"\n[Routing] Forwarding to {agent_name}")
+
+        response = agent.answer_question(
             question=query,
             search_web=True
         )
@@ -69,7 +111,7 @@ class ResearchAssistant:
 
         # Add metadata
         response["time_seconds"] = elapsed
-        response["agents"] = ["Feature Extraction Specialist"]
+        response["agents"] = [agent_name]
         response["search_count"] = len(response.get("search_queries", []))
 
         return response
@@ -189,8 +231,12 @@ Tips:
         print("      - Monosemanticity, SAEs, dictionary learning")
         print("      - TransformerLens and SAELens expertise")
         print()
-        print("Coming soon:")
         print("  [2] Circuits & Mechanistic Analysis Specialist")
+        print("      - Circuit discovery and analysis")
+        print("      - Attention head patterns and behavior")
+        print("      - Causal interventions and ablation studies")
+        print()
+        print("Coming soon:")
         print("  [3] Research Synthesizer & Trend Analyst")
         print()
 
