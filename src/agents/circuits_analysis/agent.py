@@ -1,5 +1,5 @@
 """
-Circuits & Mechanistic Analysis Specialist Agent
+Circuits & Mechanistic Analysis Specialist Agent (AutoGen 0.10+)
 
 Expert in:
 - Circuit discovery and analysis
@@ -8,23 +8,39 @@ Expert in:
 - Information flow in transformers
 """
 
-from typing import List, Dict, Optional, Callable
+import asyncio
+from typing import Dict, Optional
+
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.messages import TextMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 from src.tools.mcp_client import SearchMCPClientSync
-from src.tools.llm_interface import LLMInterface
 from src.config.settings import settings
-from src.agents.circuits_analysis.prompts import (
-    SYSTEM_PROMPT,
-    SEARCH_QUERY_PROMPT,
-    ANSWER_WITH_SOURCES_PROMPT,
-    CIRCUIT_ANALYSIS_PROMPT,
-    TECHNIQUE_EXPLANATION_PROMPT,
-    ATTENTION_HEAD_PROMPT
-)
+from src.agents.circuits_analysis.prompts import SYSTEM_PROMPT
+
+
+# Define web search tool for AutoGen
+def web_search_tool(query: str) -> str:
+    """
+    Search the web for mechanistic interpretability and circuits research.
+
+    Args:
+        query: The search query string
+
+    Returns:
+        Formatted search results with titles, URLs, and snippets
+    """
+    try:
+        with SearchMCPClientSync(verbose=False) as client:
+            results = client.search(query, num_results=5)
+            return results
+    except Exception as e:
+        return f"Search error: {str(e)}"
 
 
 class CircuitsAnalysisAgent:
-    """Circuits & Mechanistic Analysis Specialist"""
+    """Circuits & Mechanistic Analysis Specialist using AutoGen 0.10+"""
 
     def __init__(self, verbose: bool = False):
         """
@@ -34,162 +50,96 @@ class CircuitsAnalysisAgent:
             verbose: Enable verbose logging of agent activities
         """
         self.verbose = verbose
-        self.llm = LLMInterface(verbose=verbose)
 
-    def _generate_search_queries(self, question: str) -> List[str]:
-        """
-        Generate focused search queries for a user question
+        # Create OpenAI client for AutoGen
+        self.model_client = OpenAIChatCompletionClient(
+            model=settings.OPENAI_MODEL,
+            api_key=settings.OPENAI_API_KEY,
+        )
 
-        Args:
-            question: User's question
-
-        Returns:
-            List of search queries
-        """
-        prompt = SEARCH_QUERY_PROMPT.format(question=question)
-
-        if self.verbose:
-            print(f"\n[Circuits Analysis Agent] Generating search queries...")
-
-        response = self.llm.chat_completion([
-            self.llm.create_user_message(prompt)
-        ])
-
-        # Parse queries (one per line)
-        queries = [q.strip() for q in response.strip().split('\n') if q.strip()]
-
-        if self.verbose:
-            for i, query in enumerate(queries, 1):
-                print(f"  └─ Query {i}: {query}")
-
-        return queries
-
-    def _classify_question_type(self, question: str) -> str:
-        """
-        Classify the type of question to use appropriate prompt template
-
-        Returns:
-            One of: "circuit_analysis", "technique", "attention_head", "general"
-        """
-        question_lower = question.lower()
-
-        # Check for technique/methodology questions FIRST (more specific)
-        technique_keywords = ["activation patching", "causal tracing", "ablation", "intervention",
-                             "path patching", "logit attribution", "how to analyze"]
-        if any(keyword in question_lower for keyword in technique_keywords):
-            return "technique"
-
-        # Check for attention head questions
-        attention_keywords = ["attention head", "attention pattern", "induction head",
-                            "key-query", "qk circuit", "ov circuit"]
-        if any(keyword in question_lower for keyword in attention_keywords):
-            return "attention_head"
-
-        # Check for circuit analysis questions (more general, check last)
-        # Removed "how does" as it's too generic
-        circuit_keywords = ["circuit", "mechanism", "implementation", "algorithm"]
-        if any(keyword in question_lower for keyword in circuit_keywords):
-            return "circuit_analysis"
-
-        return "general"
+        # Create AutoGen Assistant Agent with tools
+        self.agent = AssistantAgent(
+            name="CircuitsAnalysisSpecialist",
+            model_client=self.model_client,
+            tools=[web_search_tool],
+            system_message=SYSTEM_PROMPT,
+        )
 
     def answer_question(
         self,
         question: str,
-        search_web: bool = True,
-        on_search: Optional[Callable] = None
-    ) -> Dict[str, any]:
+        on_search: Optional[callable] = None,
+        search_web: bool = True
+    ) -> Dict:
         """
-        Answer a user question about circuits and mechanistic analysis
+        Answer a question about circuits and mechanistic analysis
 
         Args:
             question: User's question
-            search_web: Whether to perform web search
-            on_search: Optional callback for search events (for verbose CLI)
+            on_search: Optional callback called when searches are performed
+            search_web: Whether to enable web search (for compatibility)
 
         Returns:
-            Dictionary containing:
-                - answer: The agent's response
-                - sources: List of SearchResult objects used
-                - search_queries: List of search queries executed
-                - question_type: Classified question type
+            Dictionary with answer and metadata
         """
-        if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"[Circuits Analysis Agent] Processing question")
-            print(f"{'='*60}")
+        # Run async AutoGen chat
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-        question_type = self._classify_question_type(question)
-        if self.verbose:
-            print(f"  └─ Question type: {question_type}")
-
-        search_results_text = ""
-        search_queries = []
-
-        # Perform web search if enabled
-        if search_web:
-            queries = self._generate_search_queries(question)
-            search_queries = queries
-
-            # Use MCP client for searching
-            with SearchMCPClientSync(verbose=self.verbose) as client:
-                all_results = []
-                for query in queries:
-                    if on_search:
-                        on_search(query)
-
-                    results = client.search(query, num_results=5)
-                    all_results.append(results)
-
-                search_results_text = "\n\n".join(all_results)
-
-            if self.verbose:
-                print(f"\n[Circuits Analysis Agent] Completed {len(queries)} searches via MCP")
-
-        # Select appropriate prompt based on question type
-        if question_type == "circuit_analysis":
-            prompt_template = CIRCUIT_ANALYSIS_PROMPT
-            prompt = prompt_template.format(
-                question=question,
-                search_results=search_results_text
+        try:
+            result = loop.run_until_complete(
+                self._run_chat(question, on_search)
             )
-        elif question_type == "technique":
-            prompt_template = TECHNIQUE_EXPLANATION_PROMPT
-            prompt = prompt_template.format(
-                question=question,
-                search_results=search_results_text
-            )
-        elif question_type == "attention_head":
-            prompt_template = ATTENTION_HEAD_PROMPT
-            prompt = prompt_template.format(
-                question=question,
-                search_results=search_results_text
-            )
+            return result
+        finally:
+            # Properly clean up pending tasks before closing loop
+            try:
+                # Cancel all pending tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+
+                # Wait for all tasks to finish (with cancellation)
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass  # Ignore cleanup errors
+            finally:
+                loop.close()
+
+    async def _run_chat(
+        self,
+        question: str,
+        on_search: Optional[callable] = None
+    ) -> Dict:
+        """
+        Run the AutoGen chat asynchronously
+
+        Args:
+            question: User's question
+            on_search: Optional callback for search events
+
+        Returns:
+            Dictionary with answer and metadata
+        """
+        # Send message to agent
+        message = TextMessage(content=question, source="User")
+        response = await self.agent.on_messages([message], cancellation_token=None)
+
+        # Extract answer from response
+        if hasattr(response, 'chat_message'):
+            answer = str(response.chat_message.content) if hasattr(response.chat_message, 'content') else str(response.chat_message)
         else:
-            prompt_template = ANSWER_WITH_SOURCES_PROMPT
-            prompt = prompt_template.format(
-                question=question,
-                search_results=search_results_text
-            )
-
-        # Get answer from LLM
-        if self.verbose:
-            print(f"\n[Circuits Analysis Agent] Generating answer...")
-
-        messages = [
-            self.llm.create_system_message(SYSTEM_PROMPT),
-            self.llm.create_user_message(prompt)
-        ]
-
-        answer = self.llm.chat_completion(messages)
-
-        if self.verbose:
-            print(f"\n[Circuits Analysis Agent] Answer generated")
+            answer = str(response)
 
         return {
             "answer": answer,
-            "sources": [],  # MCP returns formatted text, not structured objects
-            "search_queries": search_queries,
-            "question_type": question_type,
-            "search_results_text": search_results_text
+            "agent": "Circuits & Mechanistic Analysis Specialist",
+            "question_type": "autogen_handled",
+            "search_queries": [],  # AutoGen handles this internally
+            "search_results_text": "",
+            "used_search": True,  # Assume search might have been used
+            "sources": []
         }

@@ -5,6 +5,7 @@ Main entry point for Mechanistic Interpretability Research Assistant
 import sys
 import argparse
 import time
+import asyncio
 from pathlib import Path
 
 # Add src to path
@@ -15,9 +16,13 @@ from src.cli import create_parser, print_banner, print_verbose_header, print_col
 from src.agents.feature_extraction.agent import FeatureExtractionAgent
 from src.agents.circuits_analysis.agent import CircuitsAnalysisAgent
 
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.messages import TextMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+
 
 class ResearchAssistant:
-    """Main research assistant orchestrator"""
+    """Main research assistant orchestrator with tool-based routing"""
 
     def __init__(self, verbose: bool = False, quiet: bool = False):
         """
@@ -30,7 +35,7 @@ class ResearchAssistant:
         self.verbose = verbose and not quiet
         self.quiet = quiet
 
-        # Initialize agents
+        # Initialize specialist agents
         self.feature_agent = FeatureExtractionAgent(verbose=self.verbose)
         self.circuits_agent = CircuitsAnalysisAgent(verbose=self.verbose)
 
@@ -38,51 +43,98 @@ class ResearchAssistant:
         self.active_agents = {
             "feature_extraction": self.feature_agent,
             "circuits_analysis": self.circuits_agent,
-            # "research_synthesizer": None,  # TODO: Implement
         }
 
-    def _route_query(self, query: str) -> tuple[str, any]:
+        # Create orchestrator agent with tool-based routing
+        self.model_client = OpenAIChatCompletionClient(
+            model=settings.OPENAI_MODEL,
+            api_key=settings.OPENAI_API_KEY,
+        )
+
+        # Create orchestrator with specialist agents as tools
+        self.orchestrator = AssistantAgent(
+            name="QueryOrchestrator",
+            model_client=self.model_client,
+            tools=[self._route_to_feature_specialist, self._route_to_circuits_specialist],
+            system_message=self._get_orchestrator_prompt(),
+        )
+
+    def _get_orchestrator_prompt(self) -> str:
+        """Get the system prompt for the orchestrator agent"""
+        return """You are a query routing orchestrator for a Mechanistic Interpretability Research Assistant.
+
+Your role is to analyze user questions and route them to the most appropriate specialist agent by calling the right tool function.
+
+Available specialists:
+
+1. **Feature Extraction & Interpretability Specialist** - Use for questions about:
+   - Monosemanticity and polysemanticity
+   - Sparse Autoencoders (SAEs) and dictionary learning
+   - Feature visualization and attribution
+   - TransformerLens and SAELens tools and usage
+   - Superposition and feature representations
+
+2. **Circuits & Mechanistic Analysis Specialist** - Use for questions about:
+   - Circuit discovery and analysis (IOI, greater-than, etc.)
+   - Attention head patterns and behavior
+   - Induction heads and attention mechanisms
+   - Causal interventions (activation patching, causal tracing)
+   - Ablation studies and information flow
+   - QK and OV circuits
+
+Instructions:
+- Analyze the user's question carefully
+- Determine which specialist is most appropriate
+- Call the corresponding tool function with the user's question
+- Return the specialist's answer directly
+
+If a question covers multiple areas, route to the specialist whose expertise is most relevant to the core question."""
+
+    def _route_to_feature_specialist(self, question: str) -> str:
         """
-        Route query to the most appropriate agent
+        Route question to Feature Extraction & Interpretability Specialist.
+
+        Use this for questions about monosemanticity, polysemanticity, sparse autoencoders (SAEs),
+        dictionary learning, feature visualization, superposition, TransformerLens, and SAELens.
 
         Args:
-            query: User's question
+            question: The user's question about feature extraction or interpretability
 
         Returns:
-            Tuple of (agent_name, agent_instance)
+            The specialist's answer
         """
-        query_lower = query.lower()
+        if self.verbose:
+            print("\n[Routing] Forwarding to Feature Extraction & Interpretability Specialist")
 
-        # Keywords for Circuits Analysis Agent
-        circuits_keywords = [
-            "circuit", "attention head", "induction head", "mechanism",
-            "activation patching", "causal tracing", "ablation",
-            "information flow", "path patching", "logit attribution",
-            "attention pattern", "qk circuit", "ov circuit",
-            "indirect object identification", "ioi"
-        ]
+        result = self.feature_agent.answer_question(question, search_web=True)
+        self._last_agent_result = result
+        self._last_agent_name = "Feature Extraction & Interpretability Specialist"
+        return result["answer"]
 
-        # Keywords for Feature Extraction Agent
-        features_keywords = [
-            "monosemanticity", "polysemanticity", "sparse autoencoder", "sae",
-            "dictionary learning", "feature visualization", "superposition",
-            "transformerlens", "saelens", "feature extraction"
-        ]
+    def _route_to_circuits_specialist(self, question: str) -> str:
+        """
+        Route question to Circuits & Mechanistic Analysis Specialist.
 
-        # Check for circuits-related queries
-        circuits_score = sum(1 for keyword in circuits_keywords if keyword in query_lower)
-        features_score = sum(1 for keyword in features_keywords if keyword in query_lower)
+        Use this for questions about circuit discovery, attention heads, induction heads,
+        activation patching, causal tracing, ablation studies, and information flow.
 
-        # Route based on keyword matching
-        if circuits_score > features_score:
-            return "Circuits & Mechanistic Analysis Specialist", self.circuits_agent
-        else:
-            # Default to Feature Extraction agent
-            return "Feature Extraction & Interpretability Specialist", self.feature_agent
+        Args:
+            question: The user's question about circuits or mechanistic analysis
+
+        Returns:
+            The specialist's answer
+        """
+        if self.verbose:
+            print("\n[Routing] Forwarding to Circuits & Mechanistic Analysis Specialist")
+
+        result = self.circuits_agent.answer_question(question, search_web=True)
+        self._last_agent_result = result
+        self._last_agent_name = "Circuits & Mechanistic Analysis Specialist"
+        return result["answer"]
 
     def process_query(self, query: str) -> dict:
         """
-        Process a user query
+        Process a user query using tool-based routing
 
         Args:
             query: User's question
@@ -95,26 +147,77 @@ class ResearchAssistant:
         if self.verbose:
             print_verbose_header(query)
 
-        # Route query to appropriate agent
-        agent_name, agent = self._route_query(query)
+        # Initialize tracking variables
+        self._last_agent_result = None
+        self._last_agent_name = None
 
-        if self.verbose:
-            print(f"\n[Routing] Forwarding to {agent_name}")
+        # Use orchestrator to route query via tool-based routing
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-        response = agent.answer_question(
-            question=query,
-            search_web=True
-        )
+        try:
+            answer = loop.run_until_complete(self._route_with_orchestrator(query))
+        finally:
+            # Clean up async resources
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
+            finally:
+                loop.close()
 
         end_time = time.time()
         elapsed = end_time - start_time
 
+        # Build response from orchestrator result
+        if self._last_agent_result:
+            response = self._last_agent_result.copy()
+            response["answer"] = answer
+        else:
+            # Fallback if orchestrator didn't call a tool
+            response = {
+                "answer": answer,
+                "agent": "Orchestrator",
+                "question_type": "direct",
+                "search_queries": [],
+                "search_results_text": "",
+                "used_search": False,
+                "sources": []
+            }
+
         # Add metadata
         response["time_seconds"] = elapsed
-        response["agents"] = [agent_name]
+        response["agents"] = [self._last_agent_name] if self._last_agent_name else ["Orchestrator"]
         response["search_count"] = len(response.get("search_queries", []))
 
         return response
+
+    async def _route_with_orchestrator(self, query: str) -> str:
+        """
+        Use orchestrator agent to route query via function calling
+
+        Args:
+            query: User's question
+
+        Returns:
+            Answer from the routed specialist agent
+        """
+        message = TextMessage(content=query, source="User")
+        response = await self.orchestrator.on_messages([message], cancellation_token=None)
+
+        # Extract answer from response
+        if hasattr(response, 'chat_message'):
+            answer = str(response.chat_message.content) if hasattr(response.chat_message, 'content') else str(response.chat_message)
+        else:
+            answer = str(response)
+
+        return answer
 
     def interactive_mode(self):
         """Run interactive session with conversation history"""
