@@ -180,6 +180,48 @@ class DeepEvalEvaluator:
             )
             metrics.append(mech_interp_metric)
 
+            # Research Quality metric
+            research_quality_metric = GEval(
+                name="Research Quality",
+                criteria=(
+                    "Evaluate the quality of the research response by assessing: "
+                    "1) Depth of explanation and coverage of the topic "
+                    "2) Use of specific examples, citations, or references "
+                    "3) Logical structure and clarity of presentation "
+                    "4) Balance between technical detail and accessibility "
+                    "5) Completeness in addressing all aspects of the question"
+                ),
+                evaluation_params=[
+                    LLMTestCaseParams.INPUT,
+                    LLMTestCaseParams.ACTUAL_OUTPUT
+                ],
+                threshold=0.7,
+                model="gpt-4o-mini"
+            )
+            metrics.append(research_quality_metric)
+
+            # Source Credibility metric (only if retrieval context available)
+            if retrieval_context:
+                source_credibility_metric = GEval(
+                    name="Source Credibility",
+                    criteria=(
+                        "Evaluate the credibility and reliability of the sources used. Consider: "
+                        "1) Are sources from reputable academic papers, official documentation, or established research institutions? "
+                        "2) Are the sources recent and up-to-date for the field? "
+                        "3) Do sources come from authoritative figures or organizations in mechanistic interpretability? "
+                        "4) Are sources relevant and directly applicable to the question? "
+                        "5) Is there diversity in source types (papers, documentation, blogs from experts)?"
+                    ),
+                    evaluation_params=[
+                        LLMTestCaseParams.INPUT,
+                        LLMTestCaseParams.ACTUAL_OUTPUT,
+                        LLMTestCaseParams.RETRIEVAL_CONTEXT
+                    ],
+                    threshold=0.7,
+                    model="gpt-4o-mini"
+                )
+                metrics.append(source_credibility_metric)
+
         # Run evaluation
         if self.verbose:
             print(f"\n[DeepEval] Running {len(metrics)} metrics...")
@@ -214,6 +256,15 @@ class DeepEvalEvaluator:
                     "success": False,
                     "error": str(e)
                 }
+
+        # Calculate Agent Collaboration Effectiveness
+        collaboration_score = self._calculate_collaboration_effectiveness(
+            response=response,
+            inference_time=inference_time,
+            metrics_results=results
+        )
+
+        results["Agent Collaboration Effectiveness"] = collaboration_score
 
         # Compile full results
         eval_results = {
@@ -289,6 +340,112 @@ class DeepEvalEvaluator:
                 print(f"\n[DeepEval] Results saved to {output_file}")
 
         return final_results
+
+    def _calculate_collaboration_effectiveness(
+        self,
+        response: Dict[str, Any],
+        inference_time: float,
+        metrics_results: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Calculate Agent Collaboration Effectiveness metric
+
+        This metric evaluates how effectively the multi-agent system worked:
+        - Correct routing to appropriate specialist
+        - Efficiency (response time)
+        - Overall answer quality (based on other metrics)
+        - Resource utilization (searches performed)
+
+        Args:
+            response: Agent response dictionary
+            inference_time: Time taken for inference
+            metrics_results: Results from other metrics
+
+        Returns:
+            Dictionary with collaboration effectiveness score and details
+        """
+        # Component scores (0-1 scale)
+        component_scores = {}
+
+        # 1. Routing Effectiveness (0.3 weight)
+        # Check if appropriate agent was selected based on question type
+        agent_used = response.get("agents", ["Unknown"])[0]
+        question_type = response.get("question_type", "unknown")
+
+        # Assume routing is effective if agent was called (tool-based routing)
+        routing_effective = agent_used != "Orchestrator" and agent_used != "Unknown"
+        component_scores["routing"] = 1.0 if routing_effective else 0.5
+
+        # 2. Response Time Efficiency (0.2 weight)
+        # Penalize very slow responses (>30s), reward fast ones (<10s)
+        if inference_time < 10:
+            time_score = 1.0
+        elif inference_time < 20:
+            time_score = 0.8
+        elif inference_time < 30:
+            time_score = 0.6
+        else:
+            time_score = 0.4
+        component_scores["response_time"] = time_score
+
+        # 3. Answer Quality (0.3 weight)
+        # Average of key quality metrics
+        quality_metrics = ["Answer Relevancy", "Technical Accuracy", "Correctness"]
+        quality_scores = []
+        for metric_name in quality_metrics:
+            if metric_name in metrics_results:
+                metric_data = metrics_results[metric_name]
+                if "score" in metric_data and isinstance(metric_data["score"], (int, float)):
+                    quality_scores.append(metric_data["score"])
+
+        avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.5
+        component_scores["answer_quality"] = avg_quality
+
+        # 4. Resource Utilization (0.2 weight)
+        # Check if search was used appropriately
+        used_search = response.get("used_search", False)
+        search_count = len(response.get("search_queries", []))
+
+        # Good if search was used (1-3 queries), okay if no search needed
+        if search_count > 0 and search_count <= 3:
+            resource_score = 1.0
+        elif search_count == 0:
+            resource_score = 0.7  # May be okay for simple questions
+        elif search_count <= 5:
+            resource_score = 0.8  # Slightly too many searches
+        else:
+            resource_score = 0.5  # Too many searches
+        component_scores["resource_utilization"] = resource_score
+
+        # Calculate weighted overall score
+        weights = {
+            "routing": 0.3,
+            "response_time": 0.2,
+            "answer_quality": 0.3,
+            "resource_utilization": 0.2
+        }
+
+        overall_score = sum(
+            component_scores[component] * weights[component]
+            for component in component_scores
+        )
+
+        # Determine success
+        threshold = 0.7
+        success = overall_score >= threshold
+
+        return {
+            "score": overall_score,
+            "threshold": threshold,
+            "success": success,
+            "components": component_scores,
+            "details": {
+                "agent_used": agent_used,
+                "inference_time": inference_time,
+                "search_count": search_count,
+                "routing_effective": routing_effective
+            }
+        }
 
     def _parse_retrieval_context(self, search_results_text: str) -> List[str]:
         """

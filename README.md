@@ -168,14 +168,29 @@ pytest tests/
 
 ## Evaluation Metrics
 
-The project evaluates agents across multiple dimensions:
-- Response accuracy
-- Research quality
-- Source credibility
-- Response time
-- Agent collaboration effectiveness
+The project evaluates agents across multiple dimensions using DeepEval:
 
-Results are stored in JSON format in the `results/` directory for comparative analysis.
+### Core Metrics
+- **Answer Relevancy**: Measures how relevant the answer is to the question
+- **Technical Accuracy**: Evaluates correct use of mechanistic interpretability concepts and terminology
+- **Correctness**: Assesses factual correctness against expected outputs
+- **Research Quality**: Evaluates depth, structure, examples, and completeness of research responses
+
+### Context-Based Metrics (when sources are retrieved)
+- **Faithfulness**: Checks if answers are grounded in retrieved sources
+- **Source Credibility**: Evaluates quality, recency, and authority of sources used
+- **Contextual Precision**: Measures if relevant sources are ranked highly
+- **Contextual Recall**: Checks if all relevant information is retrieved
+
+### System Performance Metrics
+- **Response Time**: Tracks inference time for each query
+- **Agent Collaboration Effectiveness**: Composite metric evaluating:
+  - Routing effectiveness (correct specialist selection)
+  - Response time efficiency
+  - Answer quality (aggregate of quality metrics)
+  - Resource utilization (appropriate search usage)
+
+Results are stored in JSON format in the `evals/deepeval/results/` directory for comparative analysis.
 
 ## Contributing
 
